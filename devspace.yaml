@@ -1,0 +1,122 @@
+# 
+# This is the configuration file for DevSpace
+# 
+# ```sh
+# devspace use namespace private-ai # suggest to use a namespace instead of the default name space
+# devspace deploy # deploy the skeleton of the app and the dependencies (ialacol)
+# devspace dev # start syncing files to the container
+# devspace purge # to clean up
+# ```
+version: v2beta1
+deployments:
+  # This are the manifest our private app deployment
+  # The app will be in "sleep mode" after `devspace deploy`, and start when we start
+  # syncing files to the container by `devspace dev`
+  private-ai-app:
+    helm:
+      chart:
+        # We are deploying the so-called Component Chart: https://devspace.sh/component-chart/docs
+        name: component-chart
+        repo: https://charts.devspace.sh
+      values:
+        containers:
+          - image: ghcr.io/loft-sh/devspace-containers/python:3-alpine
+            command:
+            - "sleep"
+            args:
+            - "99999"
+        service:
+          ports:
+          - port: 8000
+        labels:
+          app.kubernetes.io/name: private-ai-app
+  ialacol:
+    helm:
+      # the backend for the AI app, we are using ialacol https://github.com/chenhunghan/ialacol/
+      chart:
+        name: ialacol
+        repo: https://chenhunghan.github.io/ialacol
+      # overriding values.yaml of ialacol helm chart
+      values:
+        replicas: 1
+        deployment:
+          image: quay.io/chenhunghan/ialacol:latest
+          env:
+            # We are using MPT-30B, which is the most sophisticated model at the moment
+            # If you want to start with some small but mightym try orca-mini
+            DEFAULT_MODEL_HG_REPO_ID: TheBloke/mpt-30B-GGML
+            DEFAULT_MODEL_FILE: mpt-30b.ggmlv0.q4_1.bin
+            # MPT-30B
+            # DEFAULT_MODEL_HG_REPO_ID: TheBloke/mpt-30B-GGML
+            # DEFAULT_MODEL_FILE: mpt-30b.ggmlv0.q4_1.bin
+            DEFAULT_MODEL_META: ""
+        # Request more resource if needed
+        resources:
+          {}
+        # pvc for storing the cache
+        cache:
+          persistence:
+            size: 5Gi
+            accessModes:
+              - ReadWriteOnce
+            storageClass: ~
+        cacheMountPath: /app/cache
+        # pvc for storing the models
+        model:
+          persistence:
+            size: 20Gi
+            accessModes:
+              - ReadWriteOnce
+            storageClass: ~
+        modelMountPath: /app/models
+        service:
+          type: ClusterIP
+          port: 8000
+          annotations: {}
+        # You might want to use the following to select a node with more CPU and memory
+        # for MPT-30B, we need at least 32GB of memory
+        nodeSelector: {}
+        tolerations: []
+        affinity: {}
+dev:
+  private-ai-app:
+    # Use the label selector to select the pod for swapping out the container
+    labelSelector:
+      app.kubernetes.io/name: private-ai-app
+    # use the name space we assign by devspace use namespace
+    namespace: ${DEVSPACE_NAMESPACE}
+    devImage: ghcr.io/loft-sh/devspace-containers/python:3-alpine
+    workingDir: /app
+    command: ["uvicorn"]
+    args: ["main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"]
+    # expose the port 8000 to the host
+    ports:
+    - port: "8000:8000"
+    # Add env for the pod if needed
+    env:
+    # This will tell openai python library to use the ialacol service instead of the OpenAI cloud
+    - name: OPENAI_API_BASE
+      value: "http://ialacol.${DEVSPACE_NAMESPACE}.svc.cluster.local:8000/v1"
+    # You don't need to have an OpenAI API key, but OpenAI python library will complain without it
+    - name: OPENAI_API_KEY
+      value: "sk-xxx"
+    sync:
+      - path: ./:/app
+        excludePaths:
+        - requirements.txt
+        printLogs: true
+        uploadExcludeFile: ./.dockerignore
+        downloadExcludeFile: ./.gitignore
+      - path: ./requirements.txt:/app/requirements.txt
+        # start the container after uploading the requirements.txt and install the dependencies
+        startContainer: true
+        file: true
+        printLogs: true
+        onUpload:
+          exec:
+          - command: |-
+              pip install -r requirements.txt
+            onChange: ["requirements.txt"]
+    logs:
+      enabled: true
+      lastLines: 200
